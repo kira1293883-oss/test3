@@ -1,0 +1,273 @@
+#Requires AutoHotkey v2.0
+
+; ==============================================================================
+; F11 CYCLUS REGISTER — erstatter det gamle F6-passordsenteret
+; Én rad per fil i SrcM, med ETT spesifikt passord tilordnet hver fil.
+; Ingen gjetting: F3 bruker kun det passordet som står ved siden av filen.
+; ==============================================================================
+global CyclusKart        := []     ; Array: {f: filnavn, p: passord/"VENTER_PÅ_MATING", lastNed: bool}
+global CyclusTeller       := 0
+global GjeldendeVenteFil  := ""
+global cyclusGui          := "", lvCyclus := ""
+global CyclusSkannIntervallms := 2000
+global StørrelseSjekkKart := Map()
+
+SetTimer(UtførMappeSkanningF11, CyclusSkannIntervallms)
+
+; ==============================================================================
+; F11 — ÅPNE/LUKK REGISTERPANEL
+; ==============================================================================
+TriggerF11Register() {
+    global cyclusGui, lvCyclus, CyclusSkannIntervallms, Themes, StlIdx
+    try {
+        if IsObject(cyclusGui) and WinExist("ahk_id " cyclusGui.Hwnd) {
+            cyclusGui.Destroy(), cyclusGui := ""
+            return
+        }
+        st := Themes[StlIdx]
+        cyclusGui := Gui("-Caption -Border +AlwaysOnTop")
+        cyclusGui.BackColor := st.bg
+        cyclusGui.MarginX := 25, cyclusGui.MarginY := 25
+        cyclusGui.SetFont("s10 c" st.fg " Bold", "Segoe UI")
+        cyclusGui.Add("Text", "x25 y25 w410 h25", "🔑 F11 PASSORDREGISTER [AKTIV KØ]:")
+
+        cyclusGui.SetFont("s8.5 cD0D0D0 Normal", "Segoe UI")
+        lvCyclus := cyclusGui.Add("ListView",
+            "x25 y60 w410 h200 +VScroll +HScroll +0x2000000 Background" st.ft " c" st.fg " Grid -Multi",
+            ["Filnavn i kø", "Passord"])
+
+        cyclusGui.SetFont("s8.5 cWhite Bold")
+        cyclusGui.Add("Button", "x25  y270 w130 h32 -Theme +Background3A3A3A", "🗑 Fjern valgt").OnEvent("Click", (*) => FjernValgtFraKøF11())
+        cyclusGui.Add("Button", "x163 y270 w130 h32 -Theme +Background3A3A3A", "🧹 Tøm kø").OnEvent("Click", (*) => TømHeleKøenF11())
+        cyclusGui.Add("Button", "x301 y270 w134 h32 -Theme +Background3A3A3A", "✏️ Sett passord").OnEvent("Click", (*) => SettPassordManueltF11())
+
+        cyclusGui.SetFont("s9 cAAAAAA Normal")
+        cyclusGui.Add("Text", "x25 y312 w410 h32", "Tips: Kopier et passord (Ctrl+C) og trykk Ctrl+Shift+C for å mate det til øverste fil uten passord.")
+
+        cyclusGui.Add("Button", "x25 y352 w410 h35 -Theme +Background222222", "✖ Lukk Register").OnEvent("Click", (*) => (cyclusGui.Destroy(), cyclusGui := ""))
+
+        cyclusGui.OnEvent("Close",  (*) => (cyclusGui := ""))
+        cyclusGui.OnEvent("Escape", (*) => (cyclusGui.Destroy(), cyclusGui := ""))
+
+        OppdatertCyclusPanelLiveF11()
+        cyclusGui.Show("W460 H410 Center")
+    }
+}
+
+; ==============================================================================
+; TEMA-STØTTE — F10 kan fortsatt style F11-panelet live via Themes/StlIdx
+; ==============================================================================
+UpdStl11(t) {
+    global Themes, StlIdx, cyclusGui, lvCyclus
+    static o := 0
+    try if (IsObject(cyclusGui) and WinExist("ahk_id " cyclusGui.Hwnd) and IsSet(StlIdx) and (t or StlIdx != o)) {
+        o := StlIdx, st := Themes[StlIdx]
+        cyclusGui.BackColor := st.bg
+        if (IsSet(lvCyclus) and IsObject(lvCyclus))
+            lvCyclus.Opt("+Background" st.ft " c" st.fg)
+        WinRedraw("ahk_id " cyclusGui.Hwnd)
+    }
+}
+
+OppdatertCyclusPanelLiveF11() {
+    global lvCyclus, CyclusKart
+    try {
+        if !IsSet(lvCyclus) or !IsObject(lvCyclus)
+            return
+        lvCyclus.Delete()
+        for idx, element in CyclusKart {
+            lastNed := element.HasOwnProp("lastNed") and element.lastNed
+            visPas := lastNed
+                    ? "⬇️ Laster ned..."
+                    : (element.p = "VENTER_PÅ_MATING" or element.p = "") ? "⏳ Venter på passord..."
+                    : element.p
+            lvCyclus.Add(, element.f, visPas)
+        }
+        lvCyclus.ModifyCol(1, 280)
+        lvCyclus.ModifyCol(2, 130)
+    }
+}
+
+FjernValgtFraKøF11() {
+    global lvCyclus, CyclusKart
+    if !IsSet(lvCyclus) or !IsObject(lvCyclus)
+        return
+    valgtRad := lvCyclus.GetNext()
+    if (valgtRad = 0) {
+        ToolTip("⚠️ Ingen rad valgt!")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+    valgtFilnavn := lvCyclus.GetText(valgtRad, 1)
+    nyKø := []
+    for idx, element in CyclusKart {
+        if (element.f != valgtFilnavn)
+            nyKø.Push(element)
+    }
+    CyclusKart := nyKø
+    OppdatertCyclusPanelLiveF11()
+}
+
+TømHeleKøenF11() {
+    global CyclusKart, CyclusTeller, GjeldendeVenteFil
+    if (MsgBox("Er du sikker på at du vil tømme hele køen?", "Bekreft", "YesNo Icon!") = "No")
+        return
+    CyclusKart := []
+    CyclusTeller := 0
+    GjeldendeVenteFil := ""
+    OppdatertCyclusPanelLiveF11()
+}
+
+SettPassordManueltF11() {
+    global lvCyclus, CyclusKart
+    if !IsSet(lvCyclus) or !IsObject(lvCyclus)
+        return
+    valgtRad := lvCyclus.GetNext()
+    if (valgtRad = 0) {
+        ToolTip("⚠️ Ingen rad valgt!")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+    valgtFilnavn := lvCyclus.GetText(valgtRad, 1)
+    for idx, element in CyclusKart {
+        if (element.f == valgtFilnavn) {
+            nyttPassord := InputBox("Fil: " element.f "`n`nSkriv inn passord:", "Sett passord", "w450 h180").Value
+            if (nyttPassord != "")
+                element.p := nyttPassord
+            break
+        }
+    }
+    OppdatertCyclusPanelLiveF11()
+}
+
+; ==============================================================================
+; CTRL+SHIFT+C — MATER PASSORD FRA MARKERT TEKST TIL ØVERSTE LEDIGE FIL I KØEN
+; ==============================================================================
+^+c:: {
+    global CyclusKart, GjeldendeVenteFil
+
+    A_Clipboard := ""
+    Sleep(150)
+    Send("^c")
+    if !ClipWait(1.2, 1) {
+        ToolTip("⚠️ Ingen passord detektert!")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+
+    rentPassord := Trim(String(A_Clipboard))
+    if (rentPassord == "") {
+        ToolTip("⚠️ Ugyldig tekst detektert!")
+        SetTimer(() => ToolTip(), -2000)
+        return
+    }
+
+    matingUtført := false
+    nesteFilKlar := ""
+
+    for idx, element in CyclusKart {
+        if (element.p == "VENTER_PÅ_MATING" or element.p == "") {
+            element.p := rentPassord
+            matingUtført := true
+            SoundPlay("*64")
+            break
+        }
+    }
+
+    for idx, element in CyclusKart {
+        if (element.p == "VENTER_PÅ_MATING" or element.p == "") {
+            nesteFilKlar := element.f
+            break
+        }
+    }
+
+    if (matingUtført) {
+        ToolTip(nesteFilKlar != "" ? "✅ Matet! 🚀 Neste: " nesteFilKlar : "🟢 Alle filer har passord!")
+        SetTimer(() => ToolTip(), -2500)
+        GjeldendeVenteFil := nesteFilKlar
+        OppdatertCyclusPanelLiveF11()
+    } else {
+        ToolTip("✅ Alle filer i køen har allerede passord!")
+        SetTimer(() => ToolTip(), -2000)
+    }
+}
+
+; ==============================================================================
+; MAPPEVAKT — Skanner SrcM (samme mappe som F5 "Endre Mappe" peker på)
+; Legger automatisk til nye arkivfiler i F11-køen, klare for passord.
+; ==============================================================================
+UtførMappeSkanningF11() {
+    global CyclusKart, GjeldendeVenteFil, CyclusTeller, SrcM, StørrelseSjekkKart
+
+    if (!IsSet(SrcM) or SrcM == "" or !DirExist(SrcM))
+        return
+
+    filerSettDenneRunden := Map()
+    nyeFiler := false
+
+    Loop Files, SrcM "\*.*" {
+        if !RegExMatch(A_LoopFileExt, "i)^rar$|^zip$|^7z$|^1$|^001$")
+            continue
+        if RegExMatch(A_LoopFileName, "i)\.part(?:0[2-9]|[2-9]\d*)\.rar$")
+            continue
+        if RegExMatch(A_LoopFileExt, "^(?:00[2-9]|0[1-9]\d|[1-9]\d{2,})$")
+            continue
+
+        SplitPath(A_LoopFileName, , , , &BareNavn)
+        filerSettDenneRunden[A_LoopFileName] := true
+
+        ; Størrelsesstabilitet — samme prinsipp som i mappevakten: filen må ha lik
+        ; størrelse to skanninger på rad før den regnes som ferdig nedlastet.
+        erFerdig := false
+        gjeldendeStørrelse := A_LoopFileSize
+        if StørrelseSjekkKart.Has(A_LoopFileName) {
+            erFerdig := (StørrelseSjekkKart[A_LoopFileName] == gjeldendeStørrelse)
+        }
+        StørrelseSjekkKart[A_LoopFileName] := gjeldendeStørrelse
+
+        eksisterendeElement := ""
+        for idx, element in CyclusKart {
+            if (element.f == BareNavn) {
+                eksisterendeElement := element
+                break
+            }
+        }
+
+        if (eksisterendeElement == "") {
+            CyclusKart.Push({f: BareNavn, p: "VENTER_PÅ_MATING", lastNed: !erFerdig})
+            GjeldendeVenteFil := BareNavn
+            CyclusTeller++
+            nyeFiler := true
+        } else if (erFerdig and eksisterendeElement.lastNed) {
+            eksisterendeElement.lastNed := false
+            nyeFiler := true
+        }
+    }
+
+    for filnavn in StørrelseSjekkKart.Clone() {
+        if !filerSettDenneRunden.Has(filnavn)
+            StørrelseSjekkKart.Delete(filnavn)
+    }
+
+    ; Fjern rader for filer som ikke lenger finnes i mappen (slettet/flyttet/pakket ut)
+    if (CyclusKart.Length > 0) {
+        beholdesListe := []
+        køEndret := false
+        for idx, element in CyclusKart {
+            finnesFortsatt := FileExist(SrcM "\" element.f ".rar") or FileExist(SrcM "\" element.f ".zip")
+                            or FileExist(SrcM "\" element.f ".7z")  or FileExist(SrcM "\" element.f ".001")
+                            or FileExist(SrcM "\" element.f ".1")
+            if (finnesFortsatt)
+                beholdesListe.Push(element)
+            else
+                køEndret := true
+        }
+        if (køEndret) {
+            CyclusKart := beholdesListe
+            nyeFiler := true
+        }
+    }
+
+    if (nyeFiler)
+        OppdatertCyclusPanelLiveF11()
+}
